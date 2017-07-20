@@ -1,4 +1,5 @@
 ﻿#include "ser_engine.h"
+#include <QtQml>
 #include"opensmilecomp.h"
 #include<iostream>
 #include<QEventLoop>
@@ -14,29 +15,230 @@ using std::endl;
 
 cSER_Engine::cSER_Engine(QString work_dir)//work_dir目录必须是全路径，且目录下面有SER_Engine文件夹
 {
-    this->work_dir=work_dir;
-    if(work_dir=="")
+
+
+    spyThread_running=false;
+    openSmile_runnig=false;
+    tensorFlow_runnig=false;
+    engine_running=false;
+    engine_exstart=false;
+
+   // cout<<"This is Engine speaking.wav_seg_path=" << wav_seg_path.toStdString()<<endl;
+    spyThread=new cSpyThread(wav_seg_path);
+    tensorFlow=new cTensorFlowComp(work_dir);
+    openSmile=new cOpenSmileComp(work_dir);
+
+    set_workdir(work_dir);
+
+
+    connect(this,SIGNAL(stop_all()),spyThread,SLOT(stop()));
+    connect(spyThread,SIGNAL(threadstarted(QString,bool)),this,SLOT(state_recv(QString,bool)));
+    connect(spyThread,SIGNAL(threadstopped(QString,bool)),this,SLOT(state_recv(QString,bool)));
+
+
+    connect(this,SIGNAL(stop_all()),tensorFlow,SLOT(stop_tf()));
+    connect(tensorFlow,SIGNAL(recogition_complete(QString)),this,SIGNAL(recognition_complete(QString)));
+    connect(tensorFlow,SIGNAL(started(QString,bool)),this,SLOT(state_recv(QString,bool)));
+    connect(tensorFlow,SIGNAL(stopped(QString,bool)),this,SLOT(state_recv(QString,bool)));
+
+
+
+    connect(this,SIGNAL(stop_all()),openSmile,SLOT(stop_recorder()));
+    connect(openSmile,SIGNAL(recorder_started(QString,bool)),this,SLOT(state_recv(QString,bool)));
+    connect(openSmile,SIGNAL(recorder_stopped(QString,bool)),this,SLOT(state_recv(QString,bool)));
+
+
+
+     connect(openSmile,SIGNAL(fea_extra_finished(QString)),tensorFlow,SLOT(run_trial(QString)));
+     connect(tensorFlow,SIGNAL(out_predict_result(QString,QString,QStringList)),this,SIGNAL(out_predict_result(QString,QString,QStringList)));
+     connect(spyThread,SIGNAL(turnComplete(QString)),openSmile,SLOT(fea_extract(QString)));
+     Py_Initialize();
+
+
+}
+
+int cSER_Engine::preboot_engine()
+{
+    if(engine_exstart)
     {
-        engine_path="./SER_Engine";
+        cout<<"SER_Engine pre-boot failed.Engine is already in exstart state."<<endl;
+        return -1;
+    }
+
+    QDir dir1,dir2;
+    dir1.setPath(wav_seg_path);
+    dir2.setPath(feature_path);
+    dir1.setFilter(QDir::Files );
+    dir2.setFilter(QDir::Files );
+    QFileInfoList list1,list2;
+    int count;
+    count=0;
+    list1=dir1.entryInfoList();
+    list2=dir2.entryInfoList();
+
+    if(list1.size()!=0||list2.size()!=0)
+    {
+        //清空wav_seg_path和feature_path中文件
+        cout<<"clearing tempdata..."<<endl;
+        while(count<10 && (list1.size()!=0||list2.size()!=0))
+        {
+            removeFolderContent(wav_seg_path);
+            removeFolderContent(feature_path);
+            QEventLoop eventloop;
+            QTimer::singleShot(1000, &eventloop, SLOT(quit())); //wait 2s
+            eventloop.exec();
+            dir1.refresh();
+            dir2.refresh();
+            list1=dir1.entryInfoList();
+            list2=dir2.entryInfoList();
+            count++;
+        }
+
+        if(list1.size()!=0||list2.size()!=0)
+        {
+            cout<<"clear tempdata failed."<<endl;
+            cout<<"SER Engine start failed"<<endl;
+            return -1;
+        }
+        cout<<"tempdata cleared."<<endl;
+    }
+
+    cout<<"\nSER Engine prestrating..."<<endl;
+    //开启监视线程
+    count=0;
+    cout<<"starting spyThread..."<<endl;
+    //spyThread->set_wav_seg_path(wav_seg_path);
+    spyThread->start();
+    count=0;
+
+    cout<<"start tensorflow"<<endl;
+    while(count<5 && !spyThread_running)
+    {
+        QEventLoop eventloop;
+        QTimer::singleShot(2000, &eventloop, SLOT(quit())); //wait 2s
+        eventloop.exec();
+    }
+
+    //开启 tensorflow module
+
+    tensorFlow->start();
+
+    if(spyThread_running &&  tensorFlow_runnig)
+    {
+
+        cout<<"SER Engine is in exstart state."<<endl;
+        engine_exstart=true;
+        //QMessageBox::about(NULL, "About", "SER Engine started.");
     }
     else
     {
-        engine_path=work_dir+"/SER_Engine";
+        cout<<"SER Engine pre-boot failed"<<endl;
+        emit stop_all();
+        return -1;
     }
-    model_path=engine_path+"/model";
-    tempdata_path=engine_path+"/tempdata";
-    wav_seg_path=tempdata_path+"/wav_seg";
-    feature_path=tempdata_path+"/feature";
-    openSmile_path=engine_path+"/opensmile";
-    spyThread_running=false;
-    openSmile_runnig=false;
+
+
+    return 0;
+}
+int cSER_Engine::get_startIndex()//获取录音开始编号
+{
+    return spyThread->filecur_num+1;
+}
+ QString cSER_Engine::get_wav_seg_path()
+ {
+     return wav_seg_path;
+ }
+
+int cSER_Engine::stop_recorder()//停止opensmile录音
+{
+    openSmile->stop_record();
+    return 0;
 }
 
+int cSER_Engine::start_recorder()
+{
+    if(!engine_exstart)
+    {
+        cout<<"recorder start failed. SER_Engine hasn't been pre-boot."<<endl;
+        return -1;
+    }
+/*
+    QDir dir1,dir2;
+    dir1.setPath(wav_seg_path);
+    dir2.setPath(feature_path);
+    dir1.setFilter(QDir::Files );
+    dir2.setFilter(QDir::Files );
+    QFileInfoList list1,list2;
+    int count;
+    count=0;
+    list1=dir1.entryInfoList();
+    list2=dir2.entryInfoList();
+
+    if(list1.size()!=0||list2.size()!=0)
+    {
+        //清空wav_seg_path和feature_path中文件
+        cout<<"clearing tempdata..."<<endl;
+        while(count<10 && (list1.size()!=0||list2.size()!=0))
+        {
+            removeFolderContent(wav_seg_path);
+            removeFolderContent(feature_path);
+            QEventLoop eventloop;
+            QTimer::singleShot(1000, &eventloop, SLOT(quit())); //wait 2s
+            eventloop.exec();
+            dir1.refresh();
+            dir2.refresh();
+            list1=dir1.entryInfoList();
+            list2=dir2.entryInfoList();
+            count++;
+        }
+
+        if(list1.size()!=0||list2.size()!=0)
+        {
+            cout<<"clear tempdata failed."<<endl;
+            cout<<"SER Engine start failed"<<endl;
+            return -1;
+        }
+        cout<<"tempdata cleared."<<endl;
+    }
+*/
+
+
+    //开启 opensmile 录音进程
+    cout<<"starting recorder..."<<endl;
+
+    openSmile->start_record(get_startIndex());//启动 opensmile recorder
+
+   int count=0;
+
+    while(count<5 && !openSmile_runnig)
+    {
+        QEventLoop eventloop;
+        QTimer::singleShot(2000, &eventloop, SLOT(quit())); //wait 2s
+        eventloop.exec();
+        count++;
+    }
+
+
+    if(!openSmile_runnig)
+    {
+        return -1;
+    }
+
+
+
+
+
+
+    return 0;
+}
 
 int cSER_Engine::start_engine()
 {
-    //清空wav_seg_path和feature_path中文件
-   cout<<"clearing tempdata..."<<endl;
+   if(engine_running)
+   {
+       cout<<"SER_Engine start failed.Engine is already running."<<endl;
+       return -1;
+   }
 
    QDir dir1,dir2;
    dir1.setPath(wav_seg_path);
@@ -44,47 +246,46 @@ int cSER_Engine::start_engine()
    dir1.setFilter(QDir::Files );
    dir2.setFilter(QDir::Files );
    QFileInfoList list1,list2;
-
+   int count;
    count=0;
    list1=dir1.entryInfoList();
    list2=dir2.entryInfoList();
 
-   while(count<5 && (list1.size()!=0||list2.size()!=0))
-   {
-       removeFolderContent(wav_seg_path);
-       removeFolderContent(feature_path);
-       QEventLoop eventloop;
-       QTimer::singleShot(1000, &eventloop, SLOT(quit())); //wait 2s
-       eventloop.exec();
-       dir1.refresh();
-       dir2.refresh();
-       list1=dir1.entryInfoList();
-       list2=dir2.entryInfoList();
-   }
    if(list1.size()!=0||list2.size()!=0)
    {
-       cout<<"clear tempdata failed."<<endl;
-       cout<<"SER Engine start failed"<<endl;
-       return -1;
+       //清空wav_seg_path和feature_path中文件
+       cout<<"clearing tempdata..."<<endl;
+       while(count<10 && (list1.size()!=0||list2.size()!=0))
+       {
+           removeFolderContent(wav_seg_path);
+           removeFolderContent(feature_path);
+           QEventLoop eventloop;
+           QTimer::singleShot(1000, &eventloop, SLOT(quit())); //wait 2s
+           eventloop.exec();
+           dir1.refresh();
+           dir2.refresh();
+           list1=dir1.entryInfoList();
+           list2=dir2.entryInfoList();
+           count++;
+       }
+
+       if(list1.size()!=0||list2.size()!=0)
+       {
+           cout<<"clear tempdata failed."<<endl;
+           cout<<"SER Engine start failed"<<endl;
+           return -1;
+       }
+       cout<<"tempdata cleared."<<endl;
    }
 
-   cout<<"tempdata cleared."<<endl;
 
 
-
-    //开启监视线程
-    int count=0;
-    set_workdir("D:/xiaomin/SER_Client_Gui");
     cout<<"\nstrating SER Engine..."<<endl;
-
-    spyThread=new cSpyThread(wav_seg_path);
-    connect(this,SIGNAL(stop_all()),spyThread,SLOT(stop()));
-    connect(spyThread,SIGNAL(threadstarted(QString,bool)),this,SLOT(state_recv(QString,bool)));
-    connect(spyThread,SIGNAL(threadstopped(QString,bool)),this,SLOT(state_recv(QString,bool)));
-
+    //开启监视线程
+    count=0;
     cout<<"starting spyThread..."<<endl;
+    //spyThread->set_wav_seg_path(wav_seg_path);
     spyThread->start();
-
     count=0;
 
     while(count<5 && !spyThread_running)
@@ -94,12 +295,9 @@ int cSER_Engine::start_engine()
         eventloop.exec();
     }
 
-
-    openSmile=new cOpenSmileComp(work_dir);
-    connect(this,SIGNAL(stop_all()),openSmile,SLOT(stop_recorder()));
-    connect(openSmile,SIGNAL(recorder_started(QString,bool)),this,SLOT(state_recv(QString,bool)));
-    connect(openSmile,SIGNAL(recorder_stopped(QString,bool)),this,SLOT(state_recv(QString,bool)));
-
+    //开启 tensorflow module
+    tensorFlow->start();
+    //开启 opensmile 进程
     cout<<"starting recorder..."<<endl;
 
     openSmile->start_record(work_dir);//启动 opensmile recorder
@@ -116,14 +314,12 @@ int cSER_Engine::start_engine()
 
 
 
-
-    //cout<<"spyThread_running:"<<spyThread_running<<endl;
-    //cout<<"openSmile_runnig:"<<openSmile_runnig<<endl;
-
-    if(spyThread_running && openSmile_runnig)
+    if(spyThread_running && openSmile_runnig && tensorFlow_runnig)
     {
-        connect(spyThread,SIGNAL(turnComplete(QString)),openSmile,SLOT(fea_extract(QString)));
+
         cout<<"SER Engine started."<<endl;
+        engine_running=true;
+        //QMessageBox::about(NULL, "About", "SER Engine started.");
     }
     else
     {
@@ -134,6 +330,32 @@ int cSER_Engine::start_engine()
 
     return 0;
 }
+
+int cSER_Engine:: restart_engien()
+{
+    int i;
+    cout<<"restarting SER_Engine..."<<endl;
+    if(engine_running)
+    {
+        i=stop_engine();
+        if(i!=0)
+        {
+            cout<<"SER_Engine restrat failed."<<endl;
+            return -1;
+        }
+
+    }
+
+     i=start_engine();
+     if(i!=0)
+     {
+         cout<<"SER_Engine restrat failed."<<endl;
+         return -1;
+     }
+     cout<<"SER_Engin restarted."<<endl;
+     return 0;
+}
+
 
 
 int cSER_Engine::stop_engine()
@@ -146,9 +368,8 @@ int cSER_Engine::stop_engine()
    //removeFolderContent(wav_seg_path);
    //removeFolderContent(feature_path);
 
-
     int count=0;
-    while(count<5 && (spyThread_running||openSmile_runnig))
+    while(count<5 && (spyThread_running||openSmile_runnig||tensorFlow_runnig))
     {
         QEventLoop eventloop;
         QTimer::singleShot(2000, &eventloop, SLOT(quit())); //wait 2s
@@ -156,9 +377,11 @@ int cSER_Engine::stop_engine()
     }
 
 
-    if(!spyThread_running && !openSmile_runnig)
+    if(!spyThread_running && !openSmile_runnig && !tensorFlow_runnig)
     {
         cout<<"SER Engine stopped."<<endl;
+        engine_running=true;
+        //QMessageBox::about(NULL, "About", "SER Engine stopped.");
     }
     else
     {
@@ -166,6 +389,7 @@ int cSER_Engine::stop_engine()
         return -1;
     }
 
+    engine_running=false;
 
    return 0;
 }
@@ -183,6 +407,10 @@ int cSER_Engine::state_recv(QString compName,bool state)
     {
         openSmile_runnig=state;
     }
+    else if(compName=="tfModule")
+    {
+        tensorFlow_runnig=state;
+    }
 
     return 0;
 }
@@ -192,40 +420,50 @@ int cSER_Engine::state_recv(QString compName,bool state)
 int cSER_Engine::set_workdir(QString work_dir)//设置工作目录
 {
     this->work_dir=work_dir;
-    if(work_dir=="")
-    {
-        engine_path="./SER_Engine";
-    }
-    else
-    {
-        engine_path=work_dir+"/SER_Engine";
-    }
+    engine_path=work_dir+"/SER_Engine";
     model_path=engine_path+"/model";
     tempdata_path=engine_path+"/tempdata";
     wav_seg_path=tempdata_path+"/wav_seg";
     feature_path=tempdata_path+"/feature";
     openSmile_path=engine_path+"/opensmile";
+
+    if(tensorFlow!=NULL)
+    {
+        tensorFlow->set_workdir(work_dir);
+    }
+    if(openSmile!=NULL)
+    {
+       // cout<<"work_dir="<<work_dir.toStdString()<<endl;
+        openSmile->set_workdir(work_dir);
+    }
+    if(spyThread!=NULL)
+    {
+        spyThread->set_workdir(work_dir);
+    }
     return 0;
 }
 
-cSER_Engine::~cSER_Engine()
+ cSER_Engine::~cSER_Engine()
 {
-    //清空wav_seg_path和feature_path中文件
-   // removeFolderContent(wav_seg_path);
-   // removeFolderContent(feature_path);
 
+    Py_FinalizeEx();
 
-    if(spyThread)
+    if(spyThread_running||openSmile_runnig||tensorFlow_runnig)
     {
-        delete spyThread;
+        cout<<"Engine destroyed while engine is still running."<<endl;
     }
-    if(openSmile)
-    {
-        delete openSmile;
-    }
+
+    delete openSmile;
+    delete tensorFlow;
+    delete spyThread;
 
 }
 
+void cSpyThread::set_workdir(QString work_dir)
+{
+    this->wav_seg_path=work_dir+"/SER_Engine/tempdata/wav_seg";
+    return;
+}
 
 void cSpyThread::run()
 {
@@ -237,21 +475,21 @@ void cSpyThread::run()
     dir.setSorting(QDir::Name);
     int filecount=0;
      QFile file;
-
+    is_loop=true;
 
     while(is_loop)
     {
-       // cout<<"This is spyThread speaking :spyThread is running."<<endl;
-       // sleep(3);
+     // cout<<"This is spyThread speaking :spyThread is running."<<endl;
+      // cout<<"wav_seg_path="<<wav_seg_path.toStdString()<<endl;
+
+     //   sleep(3);
         dir.refresh();
         QFileInfoList list=dir.entryInfoList();
-        int filecur_num=list.size();
-
-
+         filecur_num=list.size();
         while(filecount<filecur_num)
         {
-            cout<<"filecur_num:"<<filecur_num<<endl;
-            cout<<"filecount:"<<filecount<<endl;
+          //  cout<<"filecur_num:"<<filecur_num<<endl;
+           // cout<<"filecount:"<<filecount<<endl;
             QString filename=wav_seg_path+"/"+list.at(filecount++).fileName();
             file.setFileName(filename);
             //qDebug()<<filename<<endl;
@@ -272,8 +510,8 @@ void cSpyThread::run()
                 QTimer::singleShot(500, &eventloop, SLOT(quit()));
                 eventloop.exec();
             }
-            cout<<rt<<endl;
-            cout<<count<<endl;
+           // cout<<rt<<endl;
+            //cout<<count<<endl;
             if(!rt)
             {
                 cout<<"spyThread Error: file can not be renamed."<<endl;
@@ -292,7 +530,7 @@ void cSpyThread::run()
         }
 */
         QEventLoop eventloop;
-        QTimer::singleShot(1000, &eventloop, SLOT(quit())); //wait 1s
+        QTimer::singleShot(500, &eventloop, SLOT(quit())); //wait 1s
         eventloop.exec();
 
     }
@@ -303,8 +541,18 @@ void cSpyThread::run()
 
     return;
 }
+cSpyThread::~cSpyThread()
+{
+    cout<<"!spyThread"<<endl;
+    is_loop=false;
+    exit(0); //退出线程
+    wait(500);  //等待线程退出，最多500ms
 
-cSpyThread::cSpyThread(QString wav_seg_path):wav_seg_path(wav_seg_path),is_loop(true)
+    return;
+}
+
+
+cSpyThread::cSpyThread(QString work_dir):wav_seg_path(work_dir+"/SER_Engine/tempdata/wav_seg"),is_loop(true),filecur_num(0)
 {
 
 }

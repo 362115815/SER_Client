@@ -9,7 +9,6 @@
 bool removeFolderContent(const QString &folderDir)
 {
 
-    qDebug()<<"clearing folder:"<<folderDir<<endl;
     QDir dir(folderDir);
     QFileInfoList fileList;
     QFileInfo curFile;
@@ -54,6 +53,5 @@ bool removeFolderContent(const QString &folderDir)
         }
     }
 
-    qDebug()<<"floder cleared."<<endl;
    return true;
 }
